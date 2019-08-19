@@ -21,6 +21,10 @@ import (
 	pb "go.etcd.io/etcd/raft/raftpb"
 )
 
+/*
+* raft集群节点行为的实现，定义了各节点通信方式。
+ */
+
 type SnapshotStatus int
 
 const (
@@ -122,21 +126,30 @@ func (rd Ready) appliedCursor() uint64 {
 	return 0
 }
 
+/*
+* interface node 定义了node要实现raft算法必须实现的方法。
+ */
+
 // Node represents a node in a raft cluster.
 type Node interface {
 	// Tick increments the internal logical clock for the Node by a single tick. Election
 	// timeouts and heartbeat timeouts are in units of ticks.
+	// 时钟的实现，选举超时和心跳超时都基于此。
 	Tick()
 	// Campaign causes the Node to transition to candidate state and start campaigning to become leader.
+	// 参与竞争leader
 	Campaign(ctx context.Context) error
 	// Propose proposes that data be appended to the log. Note that proposals can be lost without
 	// notice, therefore it is user's job to ensure proposal retries.
+	// 在日志中追加日志, 追加日志请求可能丢失，需要调用端重试。
 	Propose(ctx context.Context, data []byte) error
 	// ProposeConfChange proposes config change.
 	// At most one ConfChange can be in the process of going through consensus.
 	// Application needs to call ApplyConfChange when applying EntryConfChange type entry.
+	// 提议集群配置变更。
 	ProposeConfChange(ctx context.Context, cc pb.ConfChange) error
 	// Step advances the state machine using the given message. ctx.Err() will be returned, if any.
+	// 根据变更消息执行状态机
 	Step(ctx context.Context, msg pb.Message) error
 
 	// Ready returns a channel that returns the current point-in-time state.
@@ -144,6 +157,7 @@ type Node interface {
 	//
 	// NOTE: No committed entries from the next Ready may be applied until all committed entries
 	// and snapshots from the previous one have finished.
+	// 日志已准备好提交，调用者获取ready状态后，必须调用 Advance。
 	Ready() <-chan Ready
 
 	// Advance notifies the Node that the application has saved progress up to the last Ready.
@@ -155,25 +169,32 @@ type Node interface {
 	// commands. For example. when the last Ready contains a snapshot, the application might take
 	// a long time to apply the snapshot data. To continue receiving Ready without blocking raft
 	// progress, it can call Advance before finishing applying the last ready.
+	// 进行状态的提交，收到完成标志后，必须经过提交，节点才会进行实际的状态机更新。 一个优化是：可以在提交的同时接收数据，例如
+	// 在接收快照数据的场景下，为了不阻塞接收快照数据，只要在完成apply the last ready之前调用Advance即可。
 	Advance()
 	// ApplyConfChange applies config change to the local node.
 	// Returns an opaque ConfState protobuf which must be recorded
 	// in snapshots. Will never return nil; it returns a pointer only
 	// to match MemoryStorage.Compact.
+	// 进行集群配置变更。
 	ApplyConfChange(cc pb.ConfChange) *pb.ConfState
 
 	// TransferLeadership attempts to transfer leadership to the given transferee.
+	// 变更leader
 	TransferLeadership(ctx context.Context, lead, transferee uint64)
 
 	// ReadIndex request a read state. The read state will be set in the ready.
 	// Read state has a read index. Once the application advances further than the read
 	// index, any linearizable read requests issued before the read request can be
 	// processed safely. The read state will have the same rctx attached.
+	// 保证线性一致性读。
 	ReadIndex(ctx context.Context, rctx []byte) error
 
 	// Status returns the current status of the raft state machine.
+	// 状态机的当前状态
 	Status() Status
 	// ReportUnreachable reports the given node is not reachable for the last send.
+	// 上报节点不可达
 	ReportUnreachable(id uint64)
 	// ReportSnapshot reports the status of the sent snapshot. The id is the raft ID of the follower
 	// who is meant to receive the snapshot, and the status is SnapshotFinish or SnapshotFailure.
@@ -185,8 +206,10 @@ type Node interface {
 	// updates from the leader. Therefore, it is crucial that the application ensures that any
 	// failure in snapshot sending is caught and reported back to the leader; so it can resume raft
 	// log probing in the follower.
+	// 上报快照状态
 	ReportSnapshot(id uint64, status SnapshotStatus)
 	// Stop performs any necessary termination of the Node.
+	// 停止节点
 	Stop()
 }
 
@@ -195,6 +218,11 @@ type Peer struct {
 	Context []byte
 }
 
+/*
+* 节点初始化raft，读取配置启动各个节点，初始化logindex，启动后以event-loop的方式运行。
+* 用 select 机制监听不同的channel，从而实现对不同信息的监听，进而执行相应动作。
+ */
+
 // StartNode returns a new Node given configuration and a list of raft peers.
 // It appends a ConfChangeAddNode entry for each given peer to the initial log.
 func StartNode(c *Config, peers []Peer) Node {
@@ -202,6 +230,7 @@ func StartNode(c *Config, peers []Peer) Node {
 	// become the follower at term 1 and apply initial configuration
 	// entries of term 1
 	r.becomeFollower(1, None)
+	// 将配置中的节点加入集群。
 	for _, peer := range peers {
 		cc := pb.ConfChange{Type: pb.ConfChangeAddNode, NodeID: peer.ID, Context: peer.Context}
 		d, err := cc.Marshal()
@@ -252,18 +281,29 @@ type msgWithResult struct {
 	result chan error
 }
 
+/*
+* node中主要定义了一系列channel作为raft节点以及raft节点与上层应用之间的消息通道, 当节点启动后以event-loop的方式通过
+* select 机制监听下面channel实现消息的接收和发送，进而完成消息的处理和状态变更。
+ */
 // node is the canonical implementation of the Node interface
 type node struct {
-	propc      chan msgWithResult
-	recvc      chan pb.Message
-	confc      chan pb.ConfChange
+	// 负责和上层应用交互, 接收客户端的消息。
+	propc chan msgWithResult
+	// 负责raft节点之间的通信, 传递日志，选举等信息。
+	recvc chan pb.Message
+	// 配置消息通道，负责监听节点配置的变化。
+	confc chan pb.ConfChange
+	// 配置状态。
 	confstatec chan pb.ConfState
-	readyc     chan Ready
-	advancec   chan struct{}
-	tickc      chan struct{}
-	done       chan struct{}
-	stop       chan struct{}
-	status     chan chan Status
+	// 节点与上层应用信息交互通道, 用于传递日志, 快照等信息, 将raft协议层已提交的数据传递至上层。
+	readyc chan Ready
+	// 节点与上层应用信息交互通道, 当上层应用完成日志持久化后反馈给raft协议层。
+	advancec chan struct{}
+	// 时钟消息队列，用于触发选举超时, 心跳超时。
+	tickc  chan struct{}
+	done   chan struct{}
+	stop   chan struct{}
+	status chan chan Status
 
 	logger Logger
 }
@@ -298,6 +338,7 @@ func (n *node) Stop() {
 	<-n.done
 }
 
+// 节点运行
 func (n *node) run(r *raft) {
 	var propc chan msgWithResult
 	var readyc chan Ready
@@ -343,6 +384,7 @@ func (n *node) run(r *raft) {
 		// TODO: maybe buffer the config propose if there exists one (the way
 		// described in raft dissertation)
 		// Currently it is dropped in Step silently.
+		// 接收到写消息
 		case pm := <-propc:
 			m := pm.m
 			m.From = r.id
@@ -356,6 +398,7 @@ func (n *node) run(r *raft) {
 			if pr := r.getProgress(m.From); pr != nil || !IsResponseMsg(m.Type) {
 				r.Step(m)
 			}
+		// 配置变更
 		case cc := <-n.confc:
 			if cc.NodeID == None {
 				select {
@@ -388,8 +431,10 @@ func (n *node) run(r *raft) {
 				Learners: r.learnerNodes()}:
 			case <-n.done:
 			}
+		// 超时事件到达，包括心跳超时和选举超时
 		case <-n.tickc:
 			r.tick()
+		// 数据ready，提交到上层应用。
 		case readyc <- rd:
 			if rd.SoftState != nil {
 				prevSoftSt = rd.SoftState
@@ -413,6 +458,7 @@ func (n *node) run(r *raft) {
 			r.readStates = nil
 			r.reduceUncommittedSize(rd.CommittedEntries)
 			advancec = n.advancec
+		// 已完成日志持久化。
 		case <-advancec:
 			if applyingToI != 0 {
 				r.raftLog.appliedTo(applyingToI)
@@ -424,8 +470,10 @@ func (n *node) run(r *raft) {
 			}
 			r.raftLog.stableSnapTo(prevSnapi)
 			advancec = nil
+		// 节点状态信号
 		case c := <-n.status:
 			c <- getStatus(r)
+		// 停止接收信号
 		case <-n.stop:
 			close(n.done)
 			return

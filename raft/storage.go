@@ -21,6 +21,11 @@ import (
 	pb "go.etcd.io/etcd/raft/raftpb"
 )
 
+/*
+* 持久化日志保存模块, 以interface的方式定义了实现的方式。
+*/
+
+
 // ErrCompacted is returned by Storage.Entries/Compact when a requested
 // index is unavailable because it predates the last snapshot.
 var ErrCompacted = errors.New("requested index is unavailable due to compaction")

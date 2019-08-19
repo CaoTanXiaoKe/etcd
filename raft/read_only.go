@@ -16,6 +16,11 @@ package raft
 
 import pb "go.etcd.io/etcd/raft/raftpb"
 
+/*
+* 实现了线性一致性读(linerizable read), 线性一致性读要求读请求读到最新提交的数据。针对
+* raft 存在的stale read(多leader场景)，此模块通过ReadIndex的方式保证了一致性。
+*/
+
 // ReadState provides state for read only query.
 // It's caller's responsibility to call ReadIndex first before getting
 // this state from ready, it's also caller's duty to differentiate if this

@@ -28,6 +28,10 @@ import (
 	pb "go.etcd.io/etcd/raft/raftpb"
 )
 
+/*
+* raft 算法的具体逻辑实现，每个节点都有一个raft实例。
+ */
+
 // None is a placeholder node ID used when there is no leader.
 const None uint64 = 0
 const noLimit = math.MaxUint64
@@ -667,6 +671,7 @@ func (r *raft) appendEntry(es ...pb.Entry) (accepted bool) {
 	return true
 }
 
+// 超时触发选举
 // tickElection is run by followers and candidates after r.electionTimeout.
 func (r *raft) tickElection() {
 	r.electionElapsed++
@@ -777,9 +782,11 @@ func (r *raft) becomeLeader() {
 	r.logger.Infof("%x became leader at term %d", r.id, r.Term)
 }
 
+// 参与选举
 func (r *raft) campaign(t CampaignType) {
 	var term uint64
 	var voteMsg pb.MessageType
+	// 将任期加1，成为candicate。
 	if t == campaignPreElection {
 		r.becomePreCandidate()
 		voteMsg = pb.MsgPreVote
@@ -790,6 +797,7 @@ func (r *raft) campaign(t CampaignType) {
 		voteMsg = pb.MsgVote
 		term = r.Term
 	}
+	// 判断获取的选票是否超过一半，如果是，成为leader。
 	if r.quorum() == r.poll(r.id, voteRespMsgType(voteMsg), true) {
 		// We won the election after voting for ourselves (which must mean that
 		// this is a single-node cluster). Advance to the next state.
@@ -800,6 +808,7 @@ func (r *raft) campaign(t CampaignType) {
 		}
 		return
 	}
+	// 向其他节点拉选票。
 	for id := range r.prs {
 		if id == r.id {
 			continue
@@ -1479,6 +1488,7 @@ func (r *raft) loadState(state pb.HardState) {
 	r.Vote = state.Vote
 }
 
+// 随机时间超时
 // pastElectionTimeout returns true iff r.electionElapsed is greater
 // than or equal to the randomized election timeout in
 // [electiontimeout, 2 * electiontimeout - 1].

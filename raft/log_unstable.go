@@ -16,6 +16,10 @@ package raft
 
 import pb "go.etcd.io/etcd/raft/raftpb"
 
+/*
+* raft算法的日志缓存，日志优先写缓存，待状态稳定后进行持久化。
+*/
+
 // unstable.entries[i] has raft log position i+unstable.offset.
 // Note that unstable.offset may be less than the highest log
 // position in storage; this means that the next write to storage

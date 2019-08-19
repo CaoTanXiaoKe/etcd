@@ -21,6 +21,10 @@ import (
 	pb "go.etcd.io/etcd/raft/raftpb"
 )
 
+/*
+* raft算法日志模块。
+*/
+
 type raftLog struct {
 	// storage contains all stable entries since the last snapshot.
 	storage Storage
